@@ -21,6 +21,20 @@ cp -f $bad_version single_bad_version/
 
 echo "Done"
 
+echo "Creating a jar with renamed file extensions"
+
+mkdir -p renamed_jar_class_file_extensions/classes/
+unzip -p $bad_version org/apache/logging/log4j/core/net/JndiManager.class > renamed_jar_class_file_extensions/classes/JndiManager.classrenamed
+cd renamed_jar_class_file_extensions
+echo "MalformedClassContents" > JndiManager.notaclass
+zip -v renamed-log4j-class.jar -r classes
+zip -v not-a-finding.jar JndiManager.notaclass
+rm -r classes
+rm JndiManager.notaclass
+cd ../
+
+echo "Done"
+
 echo "Creating inside_a_dist with a bad log4j jar inside uncompressed and compressed archives"
 
 mkdir -p inside_a_dist
@@ -31,6 +45,31 @@ tar -cvf ../inside_a_dist/wrapped_log4j.tar $bad_version_name
 tar -czvf ../inside_a_dist/wrapped_log4j.tar.gz $bad_version_name
 tar -cjvf ../inside_a_dist/wrapped_log4j.tar.bz2 $bad_version_name
 zip ../inside_a_dist/wrapped_log4j.zip $bad_version_name
+cd ../
+
+echo "Done"
+
+echo "Creating multiple_bad_versions_in_single_archive with a bad log4j jar inside uncompressed and compressed archives"
+
+mkdir -p multiple_bad_versions_in_single_archive
+rm -f multiple_bad_versions_in_single_archive/*
+
+cd multiple_bad_versions
+tar -czvf ../multiple_bad_versions_in_single_archive/multiple_bad_versions_in_single_archive.tar.gz log4j-core-2.14.0.jar log4j-core-2.15.0.jar
+cd ../
+
+echo "Done"
+
+echo "Creating nested_very_deep with a bad log4j jar inside two levels of tgz"
+
+mkdir -p nested_very_deep
+rm -f nested_very_deep/*
+
+cd inside_a_dist
+tar -czvf ../nested_very_deep/nested_twice.tar.gz wrapped_log4j.tar.gz
+cd ../nested_very_deep
+tar -czvf nested_thrice.tar.gz nested_twice.tar.gz
+rm nested_twice.tar.gz
 cd ../
 
 echo "Done"

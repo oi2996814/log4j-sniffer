@@ -20,8 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/fs"
-	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,53 +33,44 @@ import (
 
 func TestLog4jIdentifier(t *testing.T) {
 	t.Run("implements timeout", func(t *testing.T) {
-		ientifier := crawl.Log4jIdentifier{
-			ParseArchiveFormat: func(s string) (archive.FormatType, bool) {
-				assert.Equal(t, "bar", s)
-				return 99, true
-			},
-			ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
-				assert.Equal(t, archive.FormatType(99), formatType)
-				return archive.WalkerProviderFromFuncs(func(f *os.File) (archive.WalkFn, func() error, error) {
-					return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-						time.Sleep(50 * time.Millisecond)
-						select {
-						case <-ctx.Done():
-							return errors.New("context was cancelled")
-						default:
-							require.FailNow(t, "context should have been cancelled")
-						}
-						return nil
-					}, noopCloser, nil
+		identifier := crawl.Log4jIdentifier{
+			ArchiveWalkers: func(path string) (archive.WalkerProvider, bool) {
+				assert.Equal(t, "bar", path)
+				return archive.WalkerProviderFromFuncs(func(string) (archive.WalkCloser, error) {
+					return stubbedFileWalkCloser{
+						walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+							time.Sleep(50 * time.Millisecond)
+							select {
+							case <-ctx.Done():
+								return errors.New("context was cancelled")
+							default:
+								require.FailNow(t, "context should have been cancelled")
+							}
+							return nil
+						},
+					}, nil
 				}, nil), true
 			},
-			OpenFile:           func(s string) (*os.File, error) { return nil, nil },
 			ArchiveWalkTimeout: time.Millisecond,
 			Limiter:            ratelimit.NewUnlimited(),
 		}
-		_, _, err := ientifier.Identify(context.Background(), "foo", stubDirEntry{
-			name: "bar",
-		})
-		assert.EqualError(t, err, "context was cancelled")
+		_, err := identifier.Identify(context.Background(), "foo", "bar")
+		assert.Error(t, err)
+		assert.True(t, strings.HasSuffix(err.Error(), ": context was cancelled"))
 	})
 
 	t.Run("closes and returns close error", func(t *testing.T) {
 		expectedErr := errors.New("err")
-		ientifier := crawl.Log4jIdentifier{
-			ParseArchiveFormat: func(s string) (archive.FormatType, bool) { return 0, true },
-			ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
-				return archive.WalkerProviderFromFuncs(func(f *os.File) (archive.WalkFn, func() error, error) {
-					return func(ctx context.Context, walkFn archive.FileWalkFn) error { return nil },
-						func() error { return expectedErr }, nil
+		identifier := crawl.Log4jIdentifier{
+			ArchiveWalkers: func(string) (archive.WalkerProvider, bool) {
+				return archive.WalkerProviderFromFuncs(func(string) (archive.WalkCloser, error) {
+					return stubbedFileWalkCloser{closeErr: expectedErr}, nil
 				}, nil), true
 			},
 			ArchiveWalkTimeout: time.Second,
 			Limiter:            ratelimit.NewUnlimited(),
-			OpenFile:           func(s string) (*os.File, error) { return nil, nil },
 		}
-		_, _, err := ientifier.Identify(context.Background(), "foo", stubDirEntry{
-			name: "sdlkfjsldkjfs.tar.gz",
-		})
+		_, err := identifier.Identify(context.Background(), "foo", "sdlkfjsldkjfs.tar.gz")
 		assert.Equal(t, expectedErr, err)
 	})
 
@@ -88,31 +78,31 @@ func TestLog4jIdentifier(t *testing.T) {
 		var fileWalkCalls int
 		var readerWalkCalls int
 		identifier := crawl.Log4jIdentifier{
-			ParseArchiveFormat: func(s string) (archive.FormatType, bool) { return 0, true },
-			ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
+			ArchiveWalkers: func(string) (archive.WalkerProvider, bool) {
 				return archive.WalkerProviderFromFuncs(
-					func(f *os.File) (archive.WalkFn, func() error, error) {
-						return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-							fileWalkCalls++
-							_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
-							return nil
-						}, noopCloser, nil
+					func(path string) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{
+							walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+								fileWalkCalls++
+								_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
+								return nil
+							},
+						}, nil
 					},
-					func(r io.Reader) (archive.WalkFn, func() error, error) {
-						return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-							readerWalkCalls++
-							_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
-							return nil
-						}, noopCloser, nil
+					func(io.Reader, int64) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{
+							walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+								readerWalkCalls++
+								_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
+								return nil
+							},
+						}, nil
 					}), true
 			},
 			ArchiveWalkTimeout: time.Second,
-			ArchiveMaxSize:     1024,
 			Limiter:            ratelimit.NewUnlimited(),
-			OpenFile:           tempEmptyFile(t),
 		}
-
-		_, _, err := identifier.Identify(context.Background(), "ignored", stubDirEntry{name: ".zip"})
+		_, err := identifier.Identify(context.Background(), "ignored/.zip", ".zip")
 		require.NoError(t, err)
 		assert.Equal(t, 1, fileWalkCalls)
 		assert.Equal(t, 0, readerWalkCalls)
@@ -122,32 +112,32 @@ func TestLog4jIdentifier(t *testing.T) {
 		var fileWalkCalls int
 		var readerWalkCalls int
 		identifier := crawl.Log4jIdentifier{
-			ParseArchiveFormat: func(s string) (archive.FormatType, bool) { return 0, true },
-			ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
+			ArchiveWalkers: func(string) (archive.WalkerProvider, bool) {
 				return archive.WalkerProviderFromFuncs(
-					func(f *os.File) (archive.WalkFn, func() error, error) {
-						return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-							fileWalkCalls++
-							_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
-							return nil
-						}, noopCloser, nil
+					func(path string) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{
+							walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+								fileWalkCalls++
+								_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
+								return nil
+							}}, nil
 					},
-					func(r io.Reader) (archive.WalkFn, func() error, error) {
-						return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-							readerWalkCalls++
-							_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
-							return nil
-						}, noopCloser, nil
+					func(io.Reader, int64) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{
+							walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+								readerWalkCalls++
+								_, _ = walkFn(ctx, "", 0, &bytes.Buffer{})
+								return nil
+							},
+						}, nil
 					}), true
 			},
 			ArchiveWalkTimeout: time.Second,
-			ArchiveMaxSize:     1024,
 			ArchiveMaxDepth:    3,
 			Limiter:            ratelimit.NewUnlimited(),
-			OpenFile:           tempEmptyFile(t),
 		}
 
-		_, _, err := identifier.Identify(context.Background(), "ignored", stubDirEntry{name: ".zip"})
+		_, err := identifier.Identify(context.Background(), "ignored", ".zip")
 		require.NoError(t, err)
 		assert.Equal(t, 1, fileWalkCalls)
 		assert.Equal(t, 3, readerWalkCalls)
@@ -158,7 +148,6 @@ func TestIdentifyFromFileName(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		in      string
-		result  crawl.Finding
 		version string
 	}{{
 		name: "empty filename",
@@ -168,18 +157,17 @@ func TestIdentifyFromFileName(t *testing.T) {
 	}, {
 		name:    "log4j x.y.z vulnerable version",
 		in:      "log4j-core-2.10.0.jar",
-		result:  crawl.JarName,
 		version: "2.10.0",
 	}, {
 		name: "invalid file extension",
 		in:   "log4j-core-2.10.0.png",
 	}, {
-		name: "log4j patched version",
-		in:   "log4j-core-2.17.0.jar",
+		name:    "log4j patched version",
+		in:      "log4j-core-2.17.1.jar",
+		version: "2.17.1",
 	}, {
 		name:    "log4j major minor vulnerable version",
 		in:      "log4j-core-2.15.jar",
-		result:  crawl.JarName,
 		version: "2.15",
 	}, {
 		name: "log4j name not as start of filename",
@@ -190,30 +178,17 @@ func TestIdentifyFromFileName(t *testing.T) {
 	}, {
 		name:    "vulnerable release candidate",
 		in:      "log4j-core-2.14.1-rc1.jar",
-		result:  crawl.JarName,
 		version: "2.14.1-rc1",
 	}, {
 		name:    "case-insensitive match",
 		in:      "lOg4J-cOrE-2.14.0.jAr",
-		result:  crawl.JarName,
 		version: "2.14.0",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			identifier := crawl.Log4jIdentifier{
-				ArchiveWalkTimeout: time.Second,
-				Limiter:            ratelimit.NewUnlimited(),
-				ParseArchiveFormat: func(s string) (archive.FormatType, bool) { return 0, false },
-			}
-
-			result, version, err := identifier.Identify(context.Background(), "/path/on/disk", stubDirEntry{
-				name: tc.in,
-			})
-			require.NoError(t, err)
-			assert.Equal(t, tc.result.String(), result.String())
-			if tc.version == "" {
-				assert.Empty(t, version)
-			} else {
-				assert.Equal(t, crawl.Versions{tc.version: {}}, version)
+			version, match := crawl.FileNameMatchesLog4jJar(tc.in)
+			require.Equal(t, tc.version != "", match)
+			if match {
+				assert.Equal(t, tc.version, version.Original)
 			}
 		})
 	}
@@ -274,7 +249,7 @@ func TestIdentifyFromArchiveContents(t *testing.T) {
 		version:        "2.14.1",
 	}, {
 		name:           "fixed log4j version with JndiManager class",
-		filename:       "log4j-core-2.17.0.jar",
+		filename:       "log4j-core-2.17.1.jar",
 		filesInArchive: []string{"org/apache/logging/log4j/core/net/JndiManager.class"},
 		result:         crawl.NothingDetected,
 	}, {
@@ -298,41 +273,43 @@ func TestIdentifyFromArchiveContents(t *testing.T) {
 		version: "2.14.1",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
+			var reported int
 			identifier := crawl.Log4jIdentifier{
-				ParseArchiveFormat: func(s string) (archive.FormatType, bool) { return 0, true },
-				ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
-					return archive.WalkerProviderFromFuncs(func(f *os.File) (archive.WalkFn, func() error, error) {
-						return func(ctx context.Context, walkFn archive.FileWalkFn) error {
-							for _, path := range tc.filesInArchive {
-								if _, err := walkFn(ctx, path, 0, bytes.NewReader(emptyZipContent(t))); err != nil {
-									return err
+				ArchiveWalkers: func(string) (archive.WalkerProvider, bool) {
+					return archive.WalkerProviderFromFuncs(func(string) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{
+							walk: func(ctx context.Context, walkFn archive.FileWalkFn) error {
+								for _, path := range tc.filesInArchive {
+									if _, err := walkFn(ctx, path, 0, bytes.NewReader(emptyZipContent(t))); err != nil {
+										return err
+									}
 								}
-							}
-							return nil
-						}, noopCloser, nil
-					}, nil), true
+								return nil
+							}}, nil
+					}, func(io.Reader, int64) (archive.WalkCloser, error) {
+						return stubbedFileWalkCloser{}, nil
+					}), true
 				},
-				OpenFile:           tempEmptyFile(t),
+				ArchiveMaxDepth:    1,
 				ArchiveWalkTimeout: time.Second,
 				Limiter:            ratelimit.NewUnlimited(),
+				HandleFinding: func(ctx context.Context, path crawl.Path, result crawl.Finding, version crawl.Versions) bool {
+					reported++
+					assert.Equal(t, tc.result, result)
+					if tc.version == "" {
+						assert.Empty(t, version)
+					} else {
+						assert.Equal(t, crawl.Versions{tc.version: {}}, version)
+					}
+					return true
+				},
 			}
-			result, version, err := identifier.Identify(context.Background(), "/path/on/disk/", stubDirEntry{
-				name: tc.filename,
-			})
+			_, err := identifier.Identify(context.Background(), "/path/on/disk/"+tc.filename, tc.filename)
 			require.NoError(t, err)
-			assert.Equal(t, tc.result.String(), result.String())
-			if tc.version == "" {
-				assert.Empty(t, version)
-			} else {
-				assert.Equal(t, crawl.Versions{tc.version: {}}, version)
+			if tc.result != crawl.NothingDetected {
+				require.Equal(t, 1, reported)
 			}
 		})
-	}
-}
-
-func tempEmptyFile(t *testing.T) func(s string) (*os.File, error) {
-	return func(s string) (*os.File, error) {
-		return os.Open(mustWriteTempFile(t, "foo", nil))
 	}
 }
 
@@ -342,10 +319,15 @@ func TestFindingString(t *testing.T) {
 		Out string
 	}{
 		{},
+		{crawl.JndiLookupClassName, "JndiLookupClassName"},
+		{crawl.JndiLookupClassPackageAndName, "JndiLookupClassPackageAndName"},
 		{crawl.JndiManagerClassName, "JndiManagerClassName"},
 		{crawl.JarName, "JarName"},
 		{crawl.JarNameInsideArchive, "JarNameInsideArchive"},
 		{crawl.JndiManagerClassPackageAndName, "JndiManagerClassPackageAndName"},
+		{crawl.JarFileObfuscated, "JarFileObfuscated"},
+		{crawl.ClassBytecodePartialMatch, "ClassBytecodePartialMatch"},
+		{crawl.ClassBytecodeInstructionMd5, "ClassBytecodeInstructionMd5"},
 		{crawl.JndiManagerClassName | crawl.JarName, "JndiManagerClassName,JarName"},
 		{crawl.JndiManagerClassName | crawl.JndiManagerClassPackageAndName, "JndiManagerClassName,JndiManagerClassPackageAndName"},
 		{crawl.JndiManagerClassName | crawl.JarName | crawl.JndiManagerClassPackageAndName, "JndiManagerClassName,JarName,JndiManagerClassPackageAndName"},
@@ -357,40 +339,24 @@ func TestFindingString(t *testing.T) {
 	}
 }
 
-func mustWriteTempFile(t *testing.T, name string, content []byte) string {
-	t.Helper()
-	temp, err := os.CreateTemp(t.TempDir(), name)
-	require.NoError(t, err)
-	_, err = temp.Write(content)
-	require.NoError(t, err)
-	require.NoError(t, temp.Close())
-	return temp.Name()
+type stubbedFileWalkCloser struct {
+	walk     func(ctx context.Context, walkFn archive.FileWalkFn) error
+	closeErr error
+}
+
+func (s stubbedFileWalkCloser) Walk(ctx context.Context, walkFn archive.FileWalkFn) error {
+	if s.walk != nil {
+		return s.walk(ctx, walkFn)
+	}
+	return nil
+}
+
+func (s stubbedFileWalkCloser) Close() error {
+	return s.closeErr
 }
 
 func emptyZipContent(t *testing.T) []byte {
 	var buf bytes.Buffer
 	require.NoError(t, zip.NewWriter(&buf).Close())
 	return buf.Bytes()
-}
-
-func noopCloser() error { return nil }
-
-type stubDirEntry struct {
-	name string
-}
-
-func (s stubDirEntry) Name() string {
-	return s.name
-}
-
-func (s stubDirEntry) IsDir() bool {
-	panic("not required")
-}
-
-func (s stubDirEntry) Type() fs.FileMode {
-	panic("not required")
-}
-
-func (s stubDirEntry) Info() (fs.FileInfo, error) {
-	panic("not required")
 }

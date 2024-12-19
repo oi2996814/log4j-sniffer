@@ -5,10 +5,10 @@
 log4j-sniffer
 ============
 
-log4j-sniffer crawls for all instances of log4j that are earlier than version 2.16 on disk within a specified directory.
-It can be used to determine whether there are any vulnerable instances of log4j within a directory tree.
+log4j-sniffer crawls for all instances of log4j on disk within a specified directory.
+It can be used to determine whether there are any vulnerable instances of log4j within a directory tree and report or delete them depending on the mode used.
 
-Scanning for CVE-2021-45046 and CVE-2021-45105 is currently supported.
+Scanning for versions affected by CVE-2021-44228, CVE-2021-45046, CVE-2021-45105 and CVE-2021-44832 is currently supported.
 
 What this does
 ==============
@@ -59,9 +59,9 @@ Output for vulnerable files looks as follows:
 [INFO] Found archive with name matching vulnerable log4j-core format at examples/single_bad_version/log4j-core-2.14.1.jar
 [INFO] Found JndiManager class that was an exact md5 match for a known version at org/apache/logging/log4j/core/net/JndiManager.class
 [INFO] Found JndiLookup class in the log4j package at org/apache/logging/log4j/core/lookup/JndiLookup.class
-[MATCH] CVE-2021-45046 and CVE-2021-45105 detected in file examples/single_bad_version/log4j-core-2.14.1.jar. log4j versions: 2.14.0-2.14.1, 2.14.1. Reasons: JndiLookup class and package name matched, jar name matched, JndiManager class and package name matched, class file MD5 matched
-Files affected by CVE-2021-45046 or CVE-2021-45105 detected: 1 file(s) impacted by CVE-2021-45046 or CVE-2021-45105
-1 total files scanned, skipped 0 paths due to permission denied errors, encountered 0 errors processing paths
+[MATCH] CVE-2021-44228, CVE-2021-45046, CVE-2021-45105, CVE-2021-44832 detected in file examples/single_bad_version/log4j-core-2.14.1.jar. log4j versions: 2.14.0-2.14.1, 2.14.1. Reasons: JndiLookup class and package name matched, jar name matched, JndiManager class and package name matched, class file MD5 matched
+Files affected by CVE-2021-44228 or CVE-2021-45046 or CVE-2021-45105 or CVE-2021-44832 detected: 1 file(s)
+1 total files scanned, skipped identifying 0 files due to config, skipped 0 paths due to permission denied errors, encountered 0 errors processing paths
 ```
 
 Getting started
@@ -106,9 +106,8 @@ Getting started
 
 1. Type "Command Prompt" into the search bar at the bottom and in the right pane click "Run as administrator".
 2. Navigate to your Downloads folder, e.g. `cd C:\Users\yourname\Downloads`
-3. Run `tar -xvzf C:\Users\USERNAMEHERE\Downloads\log4j-sniffer-1.0.0-windows-amd64.tgz -C C:\Users\USERNAMEHERE\Downloads` to extract the executable.
-4. Run `.\log4j-sniffer.exe crawl C:\` to crawl the entire system, substituting the drive of your choice, e.g. `C:\`, `D:\`
-    1. Run `.\log4j-sniffer.exe crawl C:\PATH\TO\YOUR\FOLDER` to crawl specific folders.
+3. Run `log4j-sniffer-1.1.0-windows-amd64.exe crawl C:\` to crawl the entire system, substituting the drive of your choice, e.g. `C:\`, `D:\`
+    1. Run `log4j-sniffer-1.1.0-windows-amd64.exe crawl C:\PATH\TO\YOUR\FOLDER` to crawl specific folders
 
 Primary Usage
 =============
@@ -129,13 +128,15 @@ a line of JSON.
 Here is an example of the output with `--json`:
 
 ```
-{"message":"CVE-2021-45046 and CVE-2021-45105 detected","filePath":"examples/single_bad_version/log4j-core-2.14.1.jar","findings":["jndiLookupClassPackageAndName","jarName","jndiManagerClassPackageAndName","classFileMd5"],"log4jVersions":["2.14.0-2.14.1","2.14.1"]}
-{"filesScanned":1,"permissionDeniedErrors":0,"pathErrors":0,"numImpactedFiles":1}
+{"message":"CVE-2021-44228, CVE-2021-44832, CVE-2021-45046, CVE-2021-45105 detected","filePath":"examples/inside_a_dist/wrapped_log4j.tar.gz","detailedPath":"examples/inside_a_dist/wrapped_log4j.tar.gz!log4j-core-2.14.1.jar","cvesDetected":["CVE-2021-44228","CVE-2021-44832","CVE-2021-45046","CVE-2021-45105"],"findings":["jndiLookupClassPackageAndName","jarNameInsideArchive","jndiManagerClassPackageAndName","classFileMd5"],"log4jVersions":["2.14.0-2.14.1","2.14.1"]}
+{"filesScanned":1,"permissionDeniedErrors":0,"pathErrors":0,"pathsSkipped":0,"numImpactedFiles":1}
 ```
 
 The JSON fields have the following meaning:
 - message: information about the output
-- filePath: the path to the file in which the vulnerability was detected 
+- filePath: the path to the file on disk where the vulnerability was detected
+- detailedPath: the path to the vulnerable contents, which may be an archived file multiple levels nested. Nesting levels are separated by a '!'
+- cvesDetected: CVEs matched against the version found
 - log4jVersions: the versions detected at this location based on all applied detections, note that some detections are more accurate than others and so a range of versions might be reported
 
 The findings array reports the following possible values:
@@ -146,9 +147,17 @@ The findings array reports the following possible values:
 - jarNameMatched: the file scanned was a .jar file called `log4j-core-<version>.jar`
 - jarNameInsideArchiveMatched: there was a .jar file called `log4j-core-<version>.jar` inside the archive
 - classFileMd5Matched: there was a class file called `JndiManager` that matched the md5 hash of a known version
-- bytecodeInstructionMd5Matched: the bytecode of a class file called `JndiManager` exactly matched a known version, see the [Bytecode matching](#bytecode-matching) section for more details
+- classBytecodeInstructionMd5: the bytecode of a class file called `JndiManager` exactly matched a known version, see the [Bytecode matching](#bytecode-matching) section for more details
 - jarFileObfuscated: the jar the match was found in appeared to be obfuscated
 - classBytecodePartialMatch: the bytecode of a class file called `JndiManager`, or a class within an obfuscated jar, partially matched the bytecode of a known version, see the [Bytecode partial matching](#bytecode-partial-matching) section for more details
+
+The summary outlines:
+- filesScanned: the total number of files crawled
+- permissionDeniedErrors: the number of directories or files that could not be read due to permissions
+- pathErrors: the number of paths where an unexpected error occurred while trying to identify bad log4j versions
+- pathsSkipped: the numbers of paths skipped from full identification of bad log4j versions due to the config options set
+- numImpactedFiles: the total number of files impacted
+- findings: the total number of findings previously output. For file path only mode, this will equal the number of impacted files.
 
 Specifying `--summary=false` makes it such that the program does not output a summary line at the end. In this case,
 the program will only print output if vulnerabilities are found.
@@ -240,30 +249,44 @@ Usage:
   log4j-sniffer crawl <root> [flags]
 
 Flags:
-      --archives-per-second-rate-limit int                      The maximum number of archives to scan per second. 0 for unlimited.
-      --directories-per-second-rate-limit int                   The maximum number of directories to crawl per second. 0 for unlimited.
-      --disable-cve-2021-45105-detection                        Disable detection of CVE-2021-45105 in versions up to 2.16.0
-      --disable-detailed-findings                               Do not print out detailed finding information when not outputting in JSON.
-      --disable-flagging-jndi-lookup                            Do not report results that only match on the presence of a JndiLookup class.
-                                                                Even when disabled results which match other criteria will still report the presence of JndiLookup if relevant.
-      --enable-obfuscation-detection                            Enable applying partial bytecode matching to Jars that appear to be obfuscated. (default true)
-      --enable-partial-matching-on-all-classes                  Enable partial bytecode matching to all class files found.
-  -h, --help                                                    help for crawl
-      --ignore-dir strings                                      Specify directory pattern to ignore. Use multiple times to supply multiple patterns.
-                                                                Patterns should be relative to the provided root.
-                                                                e.g. ignore "^/proc" to ignore "/proc" when using a crawl root of "/"
-      --json                                                    If true, output will be in JSON format
-      --maximum-average-obfuscated-class-name-length uint32     The maximum average class name length for classes within a Jar to be considered obfuscated. (default 3)
-      --maximum-average-obfuscated-package-name-length uint32   The maximum average package name length for packages within a Jar to be considered obfuscated. (default 3)
-      --nested-archive-max-depth uint                           The maximum depth to recurse into nested archives. 
-                                                                A max depth of 0 will open up an archive on the filesystem but not any nested archives.
-      --nested-archive-max-size uint                            The maximum compressed size in bytes of any nested archive that will be unarchived for inspection.
-                                                                This limit is made a per-depth level.
-                                                                The overall limit to nested archive size unarchived should be controlled 
-                                                                by both the nested-archive-max-size and nested-archive-max-depth. (default 5242880)
-      --per-archive-timeout duration                            If this duration is exceeded when inspecting an archive, 
-                                                                an error will be logged and the crawler will move onto the next file. (default 15m0s)
-      --summary                                                 If true, outputs a summary of all operations once program completes (default true)
+      --archive-open-mode string                             Supported values:
+                                                               standard - standard file opening will be used. This may cause the filesystem cache to be populated with reads from the archive opens.
+                                                               directio - direct I/O will be used when opening archives that require sequential reading of their content without being able to skip to file tables at known locations within the file.
+                                                                          For example, "directio" can have an effect on the way that tar-based archives are read but will have no effect on zip-based archives.
+                                                                          Using "directio" will cause the filesystem cache to be skipped where possible. "directio" is not supported on tmpfs filesystems and will cause tmpfs archive files to report an error. (default "standard")
+      --archives-per-second-rate-limit int                   The maximum number of archives to scan per second. 0 for unlimited.
+      --directories-per-second-rate-limit int                The maximum number of directories to crawl per second. 0 for unlimited.
+      --disable-cve-2021-44832-detection                     Disable detection of CVE-2021-44832 in versions up to 2.17.0
+      --disable-cve-2021-45105-detection                     Disable detection of CVE-2021-45105 in versions up to 2.16.0
+      --disable-detailed-findings                            Do not print out detailed finding information when not outputting in JSON.
+      --disable-flagging-jndi-lookup                         Do not report results that only match on the presence of a JndiLookup class.
+                                                             Even when disabled results which match other criteria will still report the presence of JndiLookup if relevant.
+      --disable-unknown-versions                             Only output issues if the version of log4j can be determined (note that this will cause certain detection mechanisms to be skipped)
+      --enable-obfuscation-detection                         Enable applying partial bytecode matching to Jars that appear to be obfuscated. (default true)
+      --enable-partial-matching-on-all-classes               Enable partial bytecode matching to all class files found.
+      --enable-trace-logging                                 Enables trace logging whilst crawling. disable-detailed-findings must be set to false (the default value) for this flag to have an effect.
+      --file-path-only                                       If true, output will consist of only paths to the files in which CVEs are detected
+  -h, --help                                                 help for crawl
+      --ignore-dir strings                                   Specify directory pattern to ignore. Use multiple times to supply multiple patterns.
+                                                             Patterns should be relative to the provided root.
+                                                             e.g. ignore "^/proc" to ignore "/proc" when using a crawl root of "/"
+      --json                                                 If true, output will be in JSON format
+      --maximum-average-obfuscated-class-name-length int     The maximum class name length for a class to be considered obfuscated. (default 3)
+      --maximum-average-obfuscated-package-name-length int   The maximum average package name length a class to be considered obfuscated. (default 3)
+      --nested-archive-disk-swap-dir string                  When nested-archive-disk-swap-max-size is non-zero, this is the directory in which temporary files will be created for writing temporary large nested archives to disk. (default "/tmp")
+      --nested-archive-disk-swap-max-size uint               The maximum size in bytes of disk space allowed to use for inspecting nest archives that are over the nested-archive-max-size.
+                                                             By default no disk swap is to be allowed, nested archives will only be inspected if they fit into the configured nested-archive-max-size.
+                                                             When an archive is encountered that is over the nested-archive-max-size, an the archive may be written out to a temporary file so that it can be inspected without a large memory penalty.
+                                                             If large archives are nested within each other, an archive will be opened only if the accumulated space used for archives on disk would not exceed the configured nested-archive-disk-swap-max-size.
+      --nested-archive-max-depth uint                        The maximum depth to recurse into nested archives.
+                                                             A max depth of 0 will open up an archive on the filesystem but not any nested archives.
+      --nested-archive-max-size uint                         The maximum compressed size in bytes of any nested archive that will be unarchived for inspection.
+                                                             This limit is made a per-depth level.
+                                                             The overall limit to nested archive size unarchived should be controlled
+                                                             by both the nested-archive-max-size and nested-archive-max-depth. (default 5242880)
+      --per-archive-timeout duration                         If this duration is exceeded when inspecting an archive,
+                                                             an error will be logged and the crawler will move onto the next file. (default 15m0s)
+      --summary                                              If true, outputs a summary of all operations once program completes (default true)
 ```
 
 #### Archives
@@ -287,9 +310,9 @@ The heuristic used is that both the average package name length and class name l
 
 If you wish to turn off obfuscation detection entirely then `--enable-obfuscation-detection` can be used. If instead you wish to apply partial matching to all Jars, regardless of whether they appear obfuscated, then you can use `--enable-partial-matching-on-all-classes`.
 
-#### CVE-2021-45105
+#### CVE-2021-45105 and CVE-2021-44832
 
-If you do not wish to report results for CVE-2021-45105 then pass the `--disable-cve-2021-45105-detection` flag to the crawl command.
+If you do not wish to report results for CVE-2021-45105 or CVE-2021-44832 then pass the `--disable-cve-2021-45105-detection` or `--disable-cve-2021-44832-detection` flags to the crawl command.
 
 By default, both CVE-2021-45046 and CVE-2021-45105 will be reported.
 
@@ -303,6 +326,106 @@ ionice -c 3 nice -n 19 log4j-sniffer crawl / --ignore-dir "^/dev" --ignore-dir "
 Running against a specific Jar with all limits removed:
 ```
 log4j-sniffer crawl jar-under-suspicion.jar --enable-partial-matching-on-all-classes --nested-archive-max-depth 255 --nested-archive-max-size 5242880000
+```
+
+Delete command
+==============
+
+Most of the flags are shared with the crawl command and so it is recommended that delete be run using configuration that is known to not negatively impact performance of a host. 
+
+```
+Delete files containing log4j vulnerabilities.
+
+Crawl the file system from root, detecting files containing log4j-vulnerabilities and deleting them if they meet certain requirements determined by the command flags.
+Root must be provided and can be a single file or directory.
+
+Dry-run mode is enabled by default, where a line will be output to state where a file would be deleted when running not in dry run mode.
+It is recommended to run using dry-run mode enabled, checking the logged output and then running with dry-run disabled using the same configuration flags.
+Use --dry-run=false to turn off dry-run mode, enabling deletes.
+
+When used on windows, deleting based on file ownership is unsupported and skip-owner-check should be used instead of filepath-owner.
+
+Usage:
+  log4j-sniffer delete <root> [flags]
+
+Examples:
+Delete all findings nested beneath /path/to/dir that are owned by foo and contain findings that match both classFileMd5 and jarFileObfuscated.
+
+log4j-sniffer delete /path/to/dir --dry-run=false --filepath-owner ^/path/to/dir/.*:foo --finding-match classFileMd5 --finding-match jarFileObfuscated
+
+Flags:
+      --archive-open-mode string                             Supported values:
+                                                               standard - standard file opening will be used. This may cause the filesystem cache to be populated with reads from the archive opens.
+                                                               directio - direct I/O will be used when opening archives that require sequential reading of their content without being able to skip to file tables at known locations within the file.
+                                                                          For example, "directio" can have an effect on the way that tar-based archives are read but will have no effect on zip-based archives.
+                                                                          Using "directio" will cause the filesystem cache to be skipped where possible. "directio" is not supported on tmpfs filesystems and will cause tmpfs archive files to report an error. (default "standard")
+      --archives-per-second-rate-limit int                   The maximum number of archives to scan per second. 0 for unlimited.
+      --directories-per-second-rate-limit int                The maximum number of directories to crawl per second. 0 for unlimited.
+      --disable-cve-2021-44832-detection                     Disable detection of CVE-2021-44832 in versions up to 2.17.0
+      --disable-cve-2021-45105-detection                     Disable detection of CVE-2021-45105 in versions up to 2.16.0
+      --dry-run                                              When true, a line with be output instead of deleting a file. Use --dry-run=false to enable deletion. (default true)
+      --enable-obfuscation-detection                         Enable applying partial bytecode matching to Jars that appear to be obfuscated. (default true)
+      --enable-partial-matching-on-all-classes               Enable partial bytecode matching to all class files found.
+      --enable-trace-logging                                 Enables trace logging whilst crawling. disable-detailed-findings must be set to false (the default value) for this flag to have an effect.
+      --filepath-owner strings                               Provide a filepath pattern and owner template that will be used to check whether a file should be deleted or not when it is deemed to be vulnerable.
+                                                             Multiple values can be provided and values must be provided in the form filepath_pattern:owner_template, where a filepath pattern and owner template are colon separated.
+
+                                                             When a file is deemed to be vulnerable, the path of the file containing the vulnerability will be matched against all filepath patterns.
+                                                             For all filepath matches, the owner template will be expanded against the filepath pattern match to resolve to a file owner value that the actual file owner will then be compared against.
+                                                             Owner templates may use template variables, e.g. $1, $2, $name, that correspond to capture groups in the filepath pattern. Please refer to the standard go regexp package documentation at https://pkg.go.dev/regexp#Regexp.Expand for more detailed expanding behaviour.
+
+                                                             If no filepaths match, the file will not be deleted. If any filepaths match, all matching filepath patterns' corresponding expanded templated owner values must match against the actual file owner for the file to be deleted.
+
+                                                             Architecture-specific behaviour:
+                                                             - linux-amd64: libc-backed code is used, which is able to infer the owner of a file over a broad range of account setups.
+                                                             - linux-arm64: only the user running or users from /etc/passwd will be available to infer file ownership.
+                                                             - darwin-*: only the user running or users from /etc/passwd will be available to infer file ownership.
+                                                             - windows-*: file ownership is unsupported and --skip-owner-check should be used instead.
+
+                                                             Examples:
+                                                             --filepath-owner ^/foo/bar/.+:qux would consider /foo/bar/baz for deletion only if it is owned by qux.
+                                                             --filepath-owner ^/foo/bar/.+:qux and --filepath-owner ^/foo/bar/baz/.+:quuz would not consider /foo/bar/baz/corge for deletion if owned by either qux or quuz because both would need to match.
+                                                             --filepath-owner ^/foo/(\w+)/.*:$1 would consider /foo/bar/baz for deletion only if it is owned by bar.
+
+      --finding-match strings                                When supplied, any vulnerable finding must contain all values that are provided to finding-match for it to be considered for deletion.
+                                                             These values are considered on a finding-by-finding basis, i.e. an archive containing two separate vulnerable jars will only be deleted if either of the contained jars matches all finding-match values.
+
+                                                             Supported values are as follows, but can be provided case-insensitively:
+                                                             - ClassBytecodeInstructionMd5
+                                                             - ClassBytecodePartialMatch
+                                                             - ClassFileMd5
+                                                             - JarFileObfuscated
+                                                             - JarName
+                                                             - JarNameInsideArchive
+                                                             - JndiLookupClassName
+                                                             - JndiLookupClassPackageAndName
+                                                             - JndiManagerClassName
+                                                             - JndiManagerClassPackageAndName
+
+                                                             Example:
+                                                             --finding-match classFileMd5 and --finding-match jarFileObfuscated would only delete a file containing a vulnerability if the vulnerability contains a class file hash match and an obfuscated jar name.
+                                                             If a vulnerable finding contained only one of these finding-match values then the file would not be considered for deletion.
+
+  -h, --help                                                 help for delete
+      --ignore-dir strings                                   Specify directory pattern to ignore. Use multiple times to supply multiple patterns.
+                                                             Patterns should be relative to the provided root.
+                                                             e.g. ignore "^/proc" to ignore "/proc" when using a crawl root of "/"
+      --maximum-average-obfuscated-class-name-length int     The maximum class name length for a class to be considered obfuscated. (default 3)
+      --maximum-average-obfuscated-package-name-length int   The maximum average package name length a class to be considered obfuscated. (default 3)
+      --nested-archive-disk-swap-dir string                  When nested-archive-disk-swap-max-size is non-zero, this is the directory in which temporary files will be created for writing temporary large nested archives to disk. (default "/tmp")
+      --nested-archive-disk-swap-max-size uint               The maximum size in bytes of disk space allowed to use for inspecting nest archives that are over the nested-archive-max-size.
+                                                             By default no disk swap is to be allowed, nested archives will only be inspected if they fit into the configured nested-archive-max-size.
+                                                             When an archive is encountered that is over the nested-archive-max-size, an the archive may be written out to a temporary file so that it can be inspected without a large memory penalty.
+                                                             If large archives are nested within each other, an archive will be opened only if the accumulated space used for archives on disk would not exceed the configured nested-archive-disk-swap-max-size.
+      --nested-archive-max-depth uint                        The maximum depth to recurse into nested archives.
+                                                             A max depth of 0 will open up an archive on the filesystem but not any nested archives.
+      --nested-archive-max-size uint                         The maximum compressed size in bytes of any nested archive that will be unarchived for inspection.
+                                                             This limit is made a per-depth level.
+                                                             The overall limit to nested archive size unarchived should be controlled
+                                                             by both the nested-archive-max-size and nested-archive-max-depth. (default 5242880)
+      --per-archive-timeout duration                         If this duration is exceeded when inspecting an archive,
+                                                             an error will be logged and the crawler will move onto the next file. (default 15m0s)
+      --skip-owner-check                                     When provided, the owner of a file will not be checked before attempting a delete.
 ```
 
 Identify command

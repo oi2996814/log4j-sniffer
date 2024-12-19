@@ -19,8 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
-	"sort"
 	"strings"
 
 	"github.com/fatih/color"
@@ -31,132 +29,158 @@ type Reporter struct {
 	OutputWriter io.Writer
 	// True if reported output should be JSON, false otherwise
 	OutputJSON bool
+	// True if the reported output should consist of only the path to the file with the CVE, false otherwise. Only has
+	// an effect if OutputJSON is false.
+	OutputFilePathOnly bool
+	lastFindingFile    string
 	// Disables results only matching JndiLookup classes
 	DisableFlaggingJndiLookup bool
-	// Disables detection of CVE-45105
-	DisableCVE45105 bool
-	// Number of issues that have been found
-	count int64
+	// CVEResolver contains config for ignoring specific CVEs from reporting
+	CVEResolver CVEResolver
+	// Disables flagging issues where version of log4j is not known
+	DisableFlaggingUnknownVersions bool
+	// Number of files with issues that have been reported
+	fileCount int64
+	// Number of individual findings that have been reported
+	findingCount int64
 }
 
 type JavaCVEInstance struct {
 	Message       string   `json:"message"`
 	FilePath      string   `json:"filePath"`
+	DetailedPath  string   `json:"detailedPath"`
+	CVEsDetected  []string `json:"cvesDetected"`
 	Findings      []string `json:"findings"`
 	Log4JVersions []string `json:"log4jVersions"`
 }
 
-// Collect increments the count of number of calls to Reporter.Collect and logs the path of the vulnerable file to disk.
-func (r *Reporter) Collect(ctx context.Context, path string, d fs.DirEntry, result Finding, versionSet Versions) {
-	versions := sortVersions(versionSet)
-	if r.DisableCVE45105 && cve45105VersionsOnly(versions) {
-		return
+// Report the finding based on the configuration of the Reporter.
+// The fileCount will be incremented if the finding is a new finding, i.e. a consecutive finding based on the same file when
+// The findingCount will be incremented for every finding reported.
+// OutputFilePathOnly is set to true will not cause the counter to be incremented.
+// The returned boolean will always be true to represent that further inspection of the same file should continue.
+func (r *Reporter) Report(ctx context.Context, path Path, result Finding, versions Versions) bool {
+	if r.DisableFlaggingUnknownVersions && (len(versions) == 0 || len(versions) == 1 && versions.contains(UnknownVersion)) {
+		return true
 	}
+	var cvesFound []string
+	if len(versions) == 0 {
+		cvesFound = []string{"unknown version - unknown CVE status"}
+	} else {
+		vs, includesInvalid := ParseLog4jVersions(versions)
+		cvesFound = r.CVEResolver.CVEs(vs)
+		if includesInvalid {
+			cvesFound = append(cvesFound, "invalid version - unknown CVE status")
+		}
+	}
+	if len(cvesFound) == 0 {
+		return true
+	}
+
 	if r.DisableFlaggingJndiLookup && jndiLookupResultsOnly(result) {
-		return
+		return true
 	}
-	r.count++
+
+	r.findingCount++
+	if r.lastFindingFile != path[0] {
+		r.fileCount++
+	}
+	defer func() { r.lastFindingFile = path[0] }()
 
 	// if no output writer is specified, nothing more to do
 	if r.OutputWriter == nil {
-		return
+		return true
 	}
 
-	cveMessage := r.buildCVEMessage(versions)
+	cveMessage := strings.Join(cvesFound, ", ") + " detected"
 
 	var readableReasons []string
 	var findingNames []string
-	if result&JndiLookupClassName > 0 {
+	if result&JndiLookupClassName > 0 && !r.DisableFlaggingJndiLookup {
 		readableReasons = append(readableReasons, "JndiLookup class name matched")
-		findingNames = append(findingNames, "jndiLookupClassName")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JndiLookupClassName))
 	}
-	if result&JndiLookupClassPackageAndName > 0 {
+	if result&JndiLookupClassPackageAndName > 0 && !r.DisableFlaggingJndiLookup {
 		readableReasons = append(readableReasons, "JndiLookup class and package name matched")
-		findingNames = append(findingNames, "jndiLookupClassPackageAndName")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JndiLookupClassPackageAndName))
 	}
 	if result&JndiManagerClassName > 0 {
 		readableReasons = append(readableReasons, "JndiManager class name matched")
-		findingNames = append(findingNames, "jndiManagerClassName")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JndiManagerClassName))
 	}
 	if result&JarName > 0 {
 		readableReasons = append(readableReasons, "jar name matched")
-		findingNames = append(findingNames, "jarName")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JarName))
 	}
 	if result&JarNameInsideArchive > 0 {
 		readableReasons = append(readableReasons, "jar name inside archive matched")
-		findingNames = append(findingNames, "jarNameInsideArchive")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JarNameInsideArchive))
 	}
 	if result&JndiManagerClassPackageAndName > 0 {
 		readableReasons = append(readableReasons, "JndiManager class and package name matched")
-		findingNames = append(findingNames, "jndiManagerClassPackageAndName")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JndiManagerClassPackageAndName))
 	}
 	if result&ClassFileMd5 > 0 {
 		readableReasons = append(readableReasons, "class file MD5 matched")
-		findingNames = append(findingNames, "classFileMd5")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(ClassFileMd5))
 	}
 	if result&ClassBytecodeInstructionMd5 > 0 {
 		readableReasons = append(readableReasons, "byte code instruction MD5 matched")
-		findingNames = append(findingNames, "classBytecodeInstructionMd5")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(ClassBytecodeInstructionMd5))
 	}
 	if result&JarFileObfuscated > 0 {
 		readableReasons = append(readableReasons, "jar file appeared obfuscated")
-		findingNames = append(findingNames, "jarFileObfuscated")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(JarFileObfuscated))
 	}
 	if result&ClassBytecodePartialMatch > 0 {
 		readableReasons = append(readableReasons, "byte code partially matched known version")
-		findingNames = append(findingNames, "classBytecodePartialMatch")
+		findingNames = append(findingNames, lowerCamelCaseFindingString(ClassBytecodePartialMatch))
 	}
 
+	sortedVersions := versions.SortedList()
+	var outputToWrite string
 	if r.OutputJSON {
 		cveInfo := JavaCVEInstance{
 			Message:       cveMessage,
-			FilePath:      path,
+			FilePath:      path[0],
+			DetailedPath:  path.Joined(),
+			CVEsDetected:  cvesFound,
 			Findings:      findingNames,
-			Log4JVersions: versions,
+			Log4JVersions: sortedVersions,
 		}
 		// should not fail
 		jsonBytes, _ := json.Marshal(cveInfo)
-		_, _ = fmt.Fprintln(r.OutputWriter, string(jsonBytes))
+		outputToWrite = string(jsonBytes)
+	} else if r.OutputFilePathOnly {
+		if r.lastFindingFile == path[0] {
+			return true
+		}
+		outputToWrite = path[0]
 	} else {
-		_, _ = fmt.Fprintln(r.OutputWriter, color.YellowString("[MATCH] "+cveMessage+" in file %s. log4j versions: %s. Reasons: %s", path, strings.Join(versions, ", "), strings.Join(readableReasons, ", ")))
+		outputToWrite = color.YellowString("[MATCH] "+cveMessage+" in file %s. log4j versions: %s. Reasons: %s", path, strings.Join(sortedVersions, ", "), strings.Join(readableReasons, ", "))
 	}
+	_, _ = fmt.Fprintln(r.OutputWriter, outputToWrite)
+	return true
 }
 
-func (r *Reporter) buildCVEMessage(versions []string) string {
-	if r.DisableCVE45105 {
-		return "CVE-2021-45046 detected"
+func lowerCamelCaseFindingString(f Finding) string {
+	s := f.String()
+	if len(s) > 1 {
+		return strings.ToLower(string(s[0])) + s[1:]
 	}
-	if cve45105VersionsOnly(versions) {
-		return "CVE-2021-45105 detected"
-	}
-	return "CVE-2021-45046 and CVE-2021-45105 detected"
-}
-
-func cve45105VersionsOnly(versions []string) bool {
-	if len(versions) == 1 && (versions[0] == "2.16.0" || versions[0] == "2.12.2") {
-		return true
-	}
-	if len(versions) == 2 && versions[0] == "2.12.2" && versions[1] == "2.16.0" {
-		return true
-	}
-	return false
+	return s
 }
 
 func jndiLookupResultsOnly(result Finding) bool {
 	return result == JndiLookupClassName || result == JndiLookupClassPackageAndName
 }
 
-func sortVersions(versions Versions) []string {
-	var out []string
-	for v := range versions {
-		out = append(out, v)
-	}
-	// N.B. Lexical sort will mess with base-10 versions, but it's better than random.
-	sort.Strings(out)
-	return out
+// FileCount returns the number of unique files that have been reported.
+func (r Reporter) FileCount() int64 {
+	return r.fileCount
 }
 
-// Count returns the number of times that Collect has been called
-func (r Reporter) Count() int64 {
-	return r.count
+// FindingCount returns the number of unique findings that have been reported.
+func (r Reporter) FindingCount() int64 {
+	return r.findingCount
 }

@@ -16,16 +16,15 @@ package crawler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/palantir/log4j-sniffer/pkg/archive"
+	"github.com/palantir/log4j-sniffer/pkg/buffer"
 	"github.com/palantir/log4j-sniffer/pkg/crawl"
+	"github.com/palantir/log4j-sniffer/pkg/log"
 	"go.uber.org/ratelimit"
 )
 
@@ -45,108 +44,81 @@ type Config struct {
 	// Maximum number of archives to scan per second, or 0 for no limit.
 	ArchivesCrawledPerSecond int
 	// The maximum average class name length for a jar to be considered obfuscated.
-	ObfuscatedClassNameAverageLength uint32
+	ObfuscatedClassNameAverageLength int
 	// The maximum average package name length for a jar to be considered obfuscated.
-	ObfuscatedPackageNameAverageLength uint32
+	ObfuscatedPackageNameAverageLength int
 	// If true, print out detailed information on each finding as it is found
 	PrintDetailedOutput bool
-	// If true, doesn't flag on Jars which only contain JndiLookup classes and do not meet any other criteria for Log4j presence.
-	DisableFlaggingJndiLookup bool
-	// If true, disables detection of CVE-45105
-	DisableCVE45105 bool
 	// Ignores specifies the regular expressions used to determine which directories to omit.
 	Ignores []*regexp.Regexp
-	// If true, causes all output to be in JSON format (one JSON object per line).
-	OutputJSON bool
-	// If true, prints summary output after completion.
-	OutputSummary bool
-}
-
-type SummaryJSON struct {
-	crawl.Stats
-	NumImpactedFiles int64 `json:"numImpactedFiles"`
+	// ArchiveOpenMode prescribes the crawler to use either direct-io or standard file opening.
+	ArchiveOpenMode archive.FileOpenMode
+	// EnableTraceLogging enables trace level logging.
+	EnableTraceLogging bool
+	// ArchiveDiskSwapMaxSize is the size on disk, in bytes, that is allowed to be used for writing
+	// archives over ArchiveMaxSize to disk as temporary files.
+	// ArchiveDiskSwapMaxSize is the total size allowed across all files that exist at the same time.
+	ArchiveDiskSwapMaxSize uint
+	// ArchiveDiskSwapMaxDir is the directory in which temporary files will be written for archives
+	// that are over ArchiveMaxSize.
+	ArchiveDiskSwapMaxDir string
 }
 
 // Crawl crawls identifying and reporting vulnerable files according to crawl.Identify and crawl.Reporter using the
 // provided configuration. Returns the number of issues that were found.
-func Crawl(ctx context.Context, config Config, stdout, stderr io.Writer) (int64, error) {
+func Crawl(ctx context.Context, config Config, process crawl.HandleFindingFunc, stdout, stderr io.Writer) (crawl.Stats, error) {
 	var outputWriter io.Writer
 	if config.PrintDetailedOutput {
 		outputWriter = stdout
 	}
 	identifier := crawl.Log4jIdentifier{
-		ErrorWriter:                        stderr,
-		DetailedOutputWriter:               outputWriter,
+		Logger: log.Logger{
+			ErrorWriter:        stderr,
+			EnableTraceLogging: config.EnableTraceLogging,
+			OutputWriter:       outputWriter,
+		},
 		IdentifyObfuscation:                config.ObfuscatedClassNameAverageLength > 0 && config.ObfuscatedPackageNameAverageLength > 0,
-		ObfuscatedClassNameAverageLength:   float32(config.ObfuscatedClassNameAverageLength),
-		ObfuscatedPackageNameAverageLength: float32(config.ObfuscatedPackageNameAverageLength),
+		ObfuscatedClassNameAverageLength:   config.ObfuscatedClassNameAverageLength,
+		ObfuscatedPackageNameAverageLength: config.ObfuscatedPackageNameAverageLength,
 		Limiter:                            limiterFromConfig(config.ArchivesCrawledPerSecond),
 		ArchiveWalkTimeout:                 config.ArchiveListTimeout,
 		ArchiveMaxDepth:                    config.ArchiveMaxDepth,
-		ArchiveMaxSize:                     config.ArchiveMaxSize,
-		OpenFile:                           os.Open,
-		ParseArchiveFormat:                 archive.ParseArchiveFormatFromFile,
-		ArchiveWalkers: func(formatType archive.FormatType) (archive.WalkerProvider, bool) {
-			switch formatType {
-			case archive.ZipArchive:
-				return archive.ZipArchiveWalkers(int(config.ArchiveMaxSize)), true
-			case archive.TarArchive:
-				return archive.TarArchiveWalkers(), true
-			case archive.TarGzArchive:
-				return archive.TarGzWalkers(), true
-			case archive.TarBz2Archive:
-				return archive.TarBz2Walkers(), true
-			}
-			return nil, false
-		},
+		ArchiveWalkers:                     config.archiveWalkers(),
+		HandleFinding:                      process,
 	}
 	crawler := crawl.Crawler{
-		Limiter:     limiterFromConfig(config.DirectoriesCrawledPerSecond),
-		ErrorWriter: stderr,
-		IgnoreDirs:  config.Ignores,
-	}
-	reporter := crawl.Reporter{
-		OutputJSON:      config.OutputJSON,
-		OutputWriter:    stdout,
-		DisableCVE45105: config.DisableCVE45105,
+		Limiter:                     limiterFromConfig(config.DirectoriesCrawledPerSecond),
+		ErrorWriter:                 stderr,
+		IgnoreDirs:                  config.Ignores,
+		DirectoryEntriesPerListCall: 100,
 	}
 
-	crawlStats, err := crawler.Crawl(ctx, config.Root, identifier.Identify, reporter.Collect)
+	crawlStats, err := crawler.Crawl(ctx, config.Root, identifier.Identify)
 	if err != nil {
 		if stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "Error crawling: %v\n", err)
 		}
-		return 0, err
+		return crawl.Stats{}, err
 	}
 
-	count := reporter.Count()
-	if config.OutputSummary {
-		cveInfo := "CVE-2021-45046"
-		if !config.DisableCVE45105 {
-			cveInfo += " or CVE-2021-45105"
-		}
+	return crawlStats, nil
+}
 
-		var output string
-		if config.OutputJSON {
-			jsonBytes, err := json.Marshal(SummaryJSON{
-				Stats:            crawlStats,
-				NumImpactedFiles: count,
-			})
-			if err != nil {
-				return 0, err
-			}
-			output = string(jsonBytes)
-		} else {
-			if count > 0 {
-				output = color.RedString("Files affected by %s detected: %d file(s) impacted by %s", cveInfo, count, cveInfo)
-			} else {
-				output = color.GreenString("No files affected by %s detected", cveInfo)
-			}
-			output += color.CyanString("\n%d total files scanned, skipped %d paths due to permission denied errors, encountered %d errors processing paths", crawlStats.FilesScanned, crawlStats.PermissionDeniedCount, crawlStats.PathErrorCount)
+func (cfg Config) archiveWalkers() func(string) (archive.WalkerProvider, bool) {
+	var converter buffer.ReaderReaderAtConverter
+	if cfg.ArchiveDiskSwapMaxSize == 0 {
+		// Although using a buffer.InMemoryWithDiskOverflowReaderAtConverter with a max of 0 would yield
+		// the same resource limits here, by using a buffer.SizeCappedInMemoryReaderAtConverter we will
+		// report more user-friendly error messages when hitting the limits.
+		converter = buffer.SizeCappedInMemoryReaderAtConverter(int64(cfg.ArchiveMaxSize))
+	} else {
+		converter = &buffer.InMemoryWithDiskOverflowReaderAtConverter{
+			Path:          cfg.ArchiveDiskSwapMaxDir,
+			MaxMemorySize: int64(cfg.ArchiveMaxSize),
+			MaxDiskSpace:  int64(cfg.ArchiveDiskSwapMaxSize),
 		}
-		_, _ = fmt.Fprintln(stdout, output)
 	}
-	return count, nil
+	return archive.Walkers(converter, cfg.ArchiveOpenMode)
 }
 
 func limiterFromConfig(limit int) ratelimit.Limiter {
